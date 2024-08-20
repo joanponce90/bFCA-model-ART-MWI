@@ -1,51 +1,26 @@
-require(ggplot2)
-require(matrixStats)
-library(RColorBrewer)
-require(scales)
-library(tidyverse)
-library(readxl)
-source("/Users/joanponce/Desktop/FCA/FILES FOR JOAN/Libraries.R")
+# Load necessary library
+library(dplyr)
+library(readr)
+library(stats)
 
-#Distance decay
-##-----------------------DISTANCE DECAY-----------------------
 #1.WALK BIKE DRIVE SCENARIO-----
-#importing HCF info
-HCF<-read.csv("MWI_HCF_max.csv") #HCF
-#import EA info
-EA_pop_cent_mod1<-read.csv("pop_cent_MWI.csv")
 
-#Read the OD matrix
-#OD matrix: cols=HCF, row=EACODE
-OD_mat_wbd<-as.data.frame(read.csv("OD_WBD_3h_altered.csv"))
-
-#renaming rows
-rownames(OD_mat_wbd.df)<-as.vector(OD_mat_wbd.df[,1])
-OD_mat_wbd.df<-OD_mat_wbd.df[,-1]
-
-#counting which rows have all NAs (isolated EAs)
-missing_rows_OD_mat_wbd<-which(Reduce(`&`,as.data.frame(is.na(OD_mat_wbd.df))))
-isolated_EA_codes_WBD<-row.names(OD_mat_wbd.df)[missing_rows_OD_mat_wbd]
-
-#Min distance to HCFs from EAs
-rowmins_ODmat_wbd<-apply(OD_mat_wbd.df, 1, function(x){min(x, na.rm = TRUE)})
-
-#removing Nas in rows and cols from the OD matrix
-OD_mat_wbd0<-OD_mat_wbd.df[ , colSums(is.na(OD_mat_wbd.df)) != nrow(OD_mat_wbd.df)]
-
-#OD MAT without any isolated rows/cols
-OD_mat_wbd1<-OD_mat_wbd0[rowSums(is.na(OD_mat_wbd0)) != ncol(OD_mat_wbd0), ]
-
-rowmins_ODmat_WBD1<-apply(OD_mat_wbd1, 1, function(x){min(x, na.rm = TRUE)})
+# Origin-destination file with healthcare facilities as columns (HCF) and population centroids as rows (Population_centroid_code)
+#The origin-destination file contains the number of minutes it takes to travel from the population centroids to the HCFs
+OD_mat_wbd.df<-data <- read.csv("Example_OD_1.csv", stringsAsFactors = FALSE)
+#Naming rows
+row.names(OD_mat_wbd.df)<-OD_mat_wbd.df$X
+#removing first column
+OD_mat_wbd.df$X<-NULL
 
 Access_hourly<-function(max_hours, supply_quarterly){
-  OD_mat_wbd <-OD_mat_wbd1
+  OD_mat_wbd <-OD_mat_wbd.df
   OD_mat_wbd[OD_mat_wbd >= max_hours] <- NA
-  rowmins_ODmat_WBD<-apply(OD_mat_wbd, 1, function(x){min(x, na.rm = TRUE)})
-  
-  #Distance decay function
   OD_mat_wbd_hours<-OD_mat_wbd/60
+  #Distance decay function for the walk, bike, drive scenario
   DDF_WBD<-((1+exp(-0.7097641/0.5287538))/(1+exp((OD_mat_wbd_hours-0.7097641)/0.5287538)))
-
+  
+  # 2. W_ij=f(d_{ij})-----
   #WALK weights
   W_ij<-DDF_WBD
   
@@ -56,7 +31,7 @@ Access_hourly<-function(max_hours, supply_quarterly){
   Wi_ij <- W_ij*(1/rowSums(W_ij))
   Wj_ij <- t(t(W_ij)*(1/colSums(W_ij)))
   
-  #substituting NaNs:
+  #substituting NaNs: We use the normalized matrices
   Wi_ij0 <- Wi_ij
   Wi_ij0[is.na(Wi_ij0)]<-0
   
@@ -67,45 +42,37 @@ Access_hourly<-function(max_hours, supply_quarterly){
   Wj_ij<-Wj_ij0
   
   # 3. Create the Dj vectors----
-  #Obtain the population data and distribute the percentages to each mode of transportation
-  p_i0<-readOGR("pop_cent.shp")
-  P_i<-as.data.frame(p_i0@data)
+  #read in the population centroids and number of people data
+  P_i<-as.data.frame(read.csv("PC_PLHIV.csv"))
   
   #Accessibility of the population WBD----
-  Pi_WBD<-left_join(data.frame(id=row.names(Wi_ij)), P_i, by=c("id"="EACODE"))
+  Pi_WBD<-left_join(data.frame(id=row.names(Wi_ij)), P_i, by=c("id"="Population_centroid_code"))
   
-  #Dj vector WBD
-  Dj.vect_wbd <- t(Wi_ij) %*% Pi_WBD$NUM_PLHIV
+  #Dj (demand) vector WBD
+  Dj.vect_wbd <- t(Wi_ij) %*% Pi_WBD$Number_PLHIV
   
-  # 4. Read the Sj vector----
-  Swbd_j0 <- as.data.frame(read.csv("MWI_HCF_max.csv"))
-  Swbd_j1<-left_join(data.frame(id1=colnames(Wi_ij)), Swbd_j0, by=c("id1"="Code"))
+  # 4. Read the Sj vector (supply of each HCF)----
+  Swbd_j0 <- as.data.frame(read_csv("HCF_supply.csv"))
+  Swbd_j1<-left_join(data.frame(HCF_code=colnames(Wi_ij)), Swbd_j0, by=c("HCF_code"="HCF_code"))
   
   Access_t<-function(supplyq){
-    Sj.vect_wbd <- as.numeric(Swbd_j1[[supplyq]])
+    Sj.vect_wbd <- as.numeric(Swbd_j1$ART_supply)
     Sj.vect_wbd[is.na(Sj.vect_wbd)]<-0
     
-    # 5. Create the Lj vector----
+    # 5. Create the Lj (level of service) vector----
     Lj.vect_wbd <- Sj.vect_wbd/Dj.vect_wbd
     Lj.vect_wbd[is.infinite(Lj.vect_wbd)]<-0
     
     # 6. Accessibility------
     A.tot_WBD <- Wj_ij %*% Lj.vect_wbd
-    #plot
-    EA_file<-readOGR("ECHOS_prioritization_mdf_fixedgeom.shp")
-    A.tot_WBD.df<-data.frame(EACODE=row.names(A.tot_WBD), access=A.tot_WBD[,1])
-    EA_file_Access_WBD<-merge(EA_file, A.tot_WBD.df, by.x = "EACODE", by.y = "EACODE", all.x=T)
+    A.tot_WBD.df<-data.frame(population_centroid_code=P_i[,1], number_PLHIV=P_i[,2],access=A.tot_WBD[,1])
     
-    HCF_shp<-readOGR("MWI_HCF.shp")
-    Lj_WBD.df<-data.frame(HCF_code=row.names(Lj.vect_wbd), Lj=Lj.vect_wbd[,1], Dj=Dj.vect_wbd[,1])
-    HCF_file_Lj_WBD<-merge(HCF_shp, Lj_WBD.df, by.x = "Code", by.y = "HCF_code", all.x=T)
-    
-    return(list(HCF_file_Lj_WBD, EA_file_Access_WBD))
+    HCF_file_WBD.df<-data.frame(HCF_code=Swbd_j0[,1],ART_supply=Swbd_j0[,2], Lj=Lj.vect_wbd[,1], Dj=Dj.vect_wbd[,1])
+    return(list(A.tot_WBD.df, HCF_file_WBD.df))
   }
   temp_access<-Access_t(supply_quarterly)
   return(temp_access)
 }
 
-access_1h_all_WBD<-Access_hourly(60,'max_supply_2020')
-Lj_1h<-access_1h_all_WBD[[1]]
-access_1h<-access_1h_all_WBD[[2]]
+#Accessibility index of population centroids to ART within 180 minutes of walking/biking or driving.
+access_1h_all_WBD<-Access_hourly(180,'ART_supply')
